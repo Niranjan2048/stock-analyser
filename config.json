@@ -11,26 +11,6 @@
       "screener_url": "https://www.screener.in/company/SBILIFE"
     },
     {
-      "id": "HDFCLIFE",
-      "name": "HDFC Life Insurance Company Ltd",
-      "screener_url": "https://www.screener.in/company/HDFCLIFE"
-    },
-    {
-      "id": "ICICIGI",
-      "name": "ICICI Lombard General Insurance Company Ltd",
-      "screener_url": "https://www.screener.in/company/ICICIGI"
-    },
-    {
-      "id": "ICICIPRULI",
-      "name": "ICICI Prudential Life Insurance Company Ltd",
-      "screener_url": "https://www.screener.in/company/ICICIPRULI"
-    },
-    {
-      "id": "GICRE",
-      "name": "General Insurance Corporation of India",
-      "screener_url": "https://www.screener.in/company/GICRE"
-    },
-    {
       "id": "GODIGIT",
       "name": "Go Digit General Insurance Ltd",
       "screener_url": "https://www.screener.in/company/GODIGIT"
@@ -44,16 +24,6 @@
       "id": "STARHEALTH",
       "name": "Star Health and Allied Insurance Company Ltd",
       "screener_url": "https://www.screener.in/company/STARHEALTH"
-    },
-    {
-      "id": "NIVABUPA",
-      "name": "Niva Bupa Health Insurance Company Ltd",
-      "screener_url": "https://www.screener.in/company/NIVABUPA"
-    },
-    {
-      "id": "MEDIASSIST",
-      "name": "Medi Assist Healthcare Services Ltd",
-      "screener_url": "https://www.screener.in/company/MEDIASSIST"
     }
   ],
   "screener_credentials": {

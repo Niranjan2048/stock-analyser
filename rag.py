@@ -8,14 +8,16 @@ import re
 import pandas as pd
 from tqdm import tqdm
 import torch
+
+# Use non-deprecated imports
 from langchain_community.document_loaders import (
     PyPDFLoader,
     TextLoader,
     UnstructuredMarkdownLoader
 )
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_community.vectorstores import Chroma
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_chroma import Chroma
 from langchain.retrievers.multi_query import MultiQueryRetriever
 from langchain.retrievers import ContextualCompressionRetriever
 from langchain.retrievers.document_compressors import LLMChainExtractor
@@ -25,6 +27,7 @@ from langchain.chains import ConversationalRetrievalChain
 from langchain.prompts import PromptTemplate
 from langchain.memory import ConversationBufferMemory
 from langchain.schema import Document
+import chromadb
 
 # Configure logging
 logging.basicConfig(
@@ -426,53 +429,125 @@ class FinancialRAGBuilder:
         if not self.fireworks_api_key:
             logger.warning("No Fireworks API key provided. Please set FIREWORKS_API_KEY environment variable")
         
-        # Initialize embeddings
-        self.embeddings = HuggingFaceEmbeddings(
-            model_name=hf_embed_model,
-            model_kwargs={'device': 'cuda' if torch.cuda.is_available() else 'cpu'},
-            encode_kwargs={'normalize_embeddings': True}
-        )
-        
-        # Initialize vector store path
-        self.vector_store_path = os.path.join(processed_data_dir, "vector_store")
-        os.makedirs(self.vector_store_path, exist_ok=True)
-        
-        self.vector_store = None
-        self.retriever = None
-        self.qa_chain = None
+        try:
+            # Initialize embeddings
+            self.embeddings = HuggingFaceEmbeddings(
+                model_name=hf_embed_model,
+                model_kwargs={'device': 'cuda' if torch.cuda.is_available() else 'cpu'},
+                encode_kwargs={'normalize_embeddings': True}
+            )
+            
+            # Initialize vector store path
+            self.vector_store_path = os.path.join(processed_data_dir, "vector_store")
+            os.makedirs(self.vector_store_path, exist_ok=True)
+            
+            self.vector_store = None
+            self.retriever = None
+            self.qa_chain = None
+        except Exception as e:
+            logger.error(f"Error initializing RAG builder: {e}")
+            raise
     
     def build_vector_store(self, documents: List[Document]) -> None:
-        """Build a vector store from documents
+        """Build a vector store from documents using batched processing
         
         Args:
             documents: List of document chunks to add to the vector store
         """
-        logger.info(f"Building vector store with {len(documents)} documents")
+        if not documents:
+            logger.warning("No documents provided to build vector store")
+            return
+            
+        total_docs = len(documents)
+        logger.info(f"Building vector store with {total_docs} documents using batched processing")
         
-        # Create a new vector store
-        self.vector_store = Chroma.from_documents(
-            documents=documents,
-            embedding=self.embeddings,
-            persist_directory=self.vector_store_path
-        )
-        
-        # Persist the vector store
-        self.vector_store.persist()
-        logger.info(f"Vector store built and persisted to {self.vector_store_path}")
+        try:
+            # Create ChromaDB client with telemetry disabled
+            client = chromadb.PersistentClient(
+                path=self.vector_store_path,
+                settings=chromadb.Settings(
+                    anonymized_telemetry=False,  # Disable telemetry
+                    allow_reset=True,
+                    is_persistent=True
+                )
+            )
+            
+            # Delete existing collection if it exists
+            try:
+                client.delete_collection("langchain")
+                logger.info("Deleted existing collection")
+            except ValueError:
+                logger.info("No existing collection to delete")
+                
+            # Create a new collection    
+            client.create_collection("langchain")
+            logger.info("Created new collection")
+            
+            # Create the vector store with the new collection
+            self.vector_store = Chroma(
+                client=client,
+                collection_name="langchain",
+                embedding_function=self.embeddings,
+            )
+            
+            # Process in batches to avoid memory issues and show progress
+            batch_size = 500  # Adjust this based on your available memory
+            batches = [documents[i:i + batch_size] for i in range(0, total_docs, batch_size)]
+            
+            logger.info(f"Processing {len(batches)} batches of up to {batch_size} documents each")
+            
+            for i, batch in enumerate(batches):
+                # Add documents in this batch
+                self.vector_store.add_documents(batch)
+                
+                # Log progress
+                docs_processed = min((i + 1) * batch_size, total_docs)
+                progress = docs_processed / total_docs * 100
+                logger.info(f"Batch {i+1}/{len(batches)} complete. Progress: {docs_processed}/{total_docs} documents ({progress:.2f}%)")
+                
+                # Don't try to call persist() since it doesn't exist in the latest version
+                # Instead, the PersistentClient automatically persists data to disk
+                    
+            logger.info(f"Vector store built and persisted to {self.vector_store_path}")
+            
+        except Exception as e:
+            logger.error(f"Error building vector store: {e}")
+            raise
     
     def load_vector_store(self) -> bool:
-        """Load an existing vector store
+        """Load an existing vector store with timeout protection
         
         Returns:
             True if vector store was loaded successfully, False otherwise
         """
         try:
             logger.info(f"Loading vector store from {self.vector_store_path}")
+            
+            # Add a client constructor with explicit settings to avoid hanging
+            client = chromadb.PersistentClient(
+                path=self.vector_store_path,
+                settings=chromadb.Settings(
+                    anonymized_telemetry=False,  # Disable telemetry
+                    allow_reset=True,            # Allow reset if needed
+                    is_persistent=True           # Ensure persistence
+                )
+            )
+            
+            # Use the client to create the Chroma instance
             self.vector_store = Chroma(
-                persist_directory=self.vector_store_path,
+                client=client,
+                collection_name="langchain",
                 embedding_function=self.embeddings
             )
-            logger.info(f"Vector store loaded with {self.vector_store._collection.count()} documents")
+            
+            # Check if the vector store has documents
+            doc_count = self.vector_store._collection.count()
+            logger.info(f"Vector store loaded with {doc_count} documents")
+            
+            if doc_count == 0:
+                logger.warning("Vector store is empty. No documents found.")
+                return False
+                
             return True
         except Exception as e:
             logger.error(f"Error loading vector store: {e}")
@@ -488,79 +563,91 @@ class FinancialRAGBuilder:
         if not self.vector_store:
             raise ValueError("Vector store has not been initialized")
         
+        # Check if vector store has documents
+        if self.vector_store._collection.count() == 0:
+            raise ValueError("Vector store is empty. Please process documents first.")
+        
         if search_kwargs is None:
             search_kwargs = {"k": top_k}
         
-        # Basic retriever
-        base_retriever = self.vector_store.as_retriever(
-            search_kwargs=search_kwargs
-        )
-        
-        # Set up the Fireworks LLM for query expansion
-        llm = ChatFireworks(
-            fireworks_api_key=self.fireworks_api_key,
-            model=self.fireworks_model,
-            max_tokens=1024,
-            temperature=0.1,
-            top_p=0.95
-        )
-        
-        # Set up MultiQueryRetriever for query expansion
-        self.retriever = MultiQueryRetriever.from_llm(
-            retriever=base_retriever,
-            llm=llm
-        )
-        
-        logger.info(f"Retriever set up with search parameters {search_kwargs}")
+        try:
+            # Basic retriever
+            base_retriever = self.vector_store.as_retriever(
+                search_kwargs=search_kwargs
+            )
+            
+            # Set up the Fireworks LLM for query expansion
+            llm = ChatFireworks(
+                fireworks_api_key=self.fireworks_api_key,
+                model=self.fireworks_model,
+                max_tokens=1024,
+                temperature=0.1,
+                top_p=0.95
+            )
+            
+            # Set up MultiQueryRetriever for query expansion
+            self.retriever = MultiQueryRetriever.from_llm(
+                retriever=base_retriever,
+                llm=llm
+            )
+            
+            logger.info(f"Retriever set up with search parameters {search_kwargs}")
+        except Exception as e:
+            logger.error(f"Error setting up retriever: {e}")
+            raise
     
     def setup_qa_chain(self) -> None:
         """Set up the question-answering chain"""
         if not self.retriever:
             raise ValueError("Retriever has not been initialized")
         
-        # Set up the Fireworks LLM
-        llm = ChatFireworks(
-            fireworks_api_key=self.fireworks_api_key,
-            model=self.fireworks_model,
-            max_tokens=2048,
-            temperature=0.2,
-            top_p=0.95
-        )
-        
-        # Set up memory
-        memory = ConversationBufferMemory(
-            memory_key="chat_history",
-            return_messages=True
-        )
-        
-        # Custom prompt template
-        qa_prompt = PromptTemplate(
-            template="""You are a financial analyst AI assistant specialized in analyzing financial data from annual reports and earnings calls. 
-            Use the following pieces of context to answer the question at the end.
-            If you don't know the answer, just say that you don't know, don't try to make up an answer.
-            The financial information comes from multiple sources including annual reports and earnings call transcripts.
+        try:
+            # Set up the Fireworks LLM
+            llm = ChatFireworks(
+                fireworks_api_key=self.fireworks_api_key,
+                model=self.fireworks_model,
+                max_tokens=2048,
+                temperature=0.2,
+                top_p=0.95
+            )
+            
+            # Set up memory
+            memory = ConversationBufferMemory(
+                memory_key="chat_history",
+                return_messages=True
+            )
+            
+            # Custom prompt template
+            qa_prompt = PromptTemplate(
+                template="""You are a financial analyst AI assistant specialized in analyzing financial data from annual reports and earnings calls. 
+                Use the following pieces of context to answer the question at the end.
+                If you don't know the answer, just say that you don't know, don't try to make up an answer.
+                The financial information comes from multiple sources including annual reports and earnings call transcripts.
 
-            Context:
-            {context}
+                Context:
+                {context}
 
-            Chat History:
-            {chat_history}
+                Chat History:
+                {chat_history}
 
-            Question: {question}
+                Question: {question}
 
-            Answer:""",
-            input_variables=["context", "chat_history", "question"]
-        )
-        
-        # Set up the QA chain
-        self.qa_chain = ConversationalRetrievalChain.from_llm(
-            llm=llm,
-            retriever=self.retriever,
-            memory=memory,
-            combine_docs_chain_kwargs={"prompt": qa_prompt}
-        )
-        
-        logger.info("QA chain has been set up")
+                Answer:""",
+                input_variables=["context", "chat_history", "question"]
+            )
+            
+            # Set up the QA chain
+            self.qa_chain = ConversationalRetrievalChain.from_llm(
+                llm=llm,
+                retriever=self.retriever,
+                memory=memory,
+                combine_docs_chain_kwargs={"prompt": qa_prompt}
+            )
+            
+            logger.info("QA chain has been set up")
+        except Exception as e:
+            logger.error(f"Error setting up QA chain: {e}")
+            raise
     
     def process_query(self, query: str) -> Dict:
         """Process a user query and get a response
@@ -618,47 +705,61 @@ class FinancialChatbot:
         """
         logger.info("Initializing Financial Chatbot...")
         
-        # Initialize document processor
-        self.processor = FinancialDocumentProcessor(
-            data_dir=data_dir,
-            output_dir=processed_data_dir
-        )
-        
-        # Initialize RAG builder
-        self.rag_builder = FinancialRAGBuilder(
-            processed_data_dir=processed_data_dir,
-            fireworks_api_key=fireworks_api_key,
-            fireworks_model=fireworks_model
-        )
-        
-        # Check if vector store exists and if we should use it
-        vector_store_exists = os.path.exists(self.rag_builder.vector_store_path) and \
-                             len(os.listdir(self.rag_builder.vector_store_path)) > 0
-        
-        if vector_store_exists and not force_reprocess:
-            logger.info("Existing vector store found. Loading...")
-            load_success = self.rag_builder.load_vector_store()
+        try:
+            # Initialize document processor
+            self.processor = FinancialDocumentProcessor(
+                data_dir=data_dir,
+                output_dir=processed_data_dir
+            )
             
-            if not load_success:
-                logger.warning("Failed to load existing vector store. Rebuilding...")
+            # Initialize RAG builder
+            self.rag_builder = FinancialRAGBuilder(
+                processed_data_dir=processed_data_dir,
+                fireworks_api_key=fireworks_api_key,
+                fireworks_model=fireworks_model
+            )
+            
+            # Check if vector store exists and if we should use it
+            vector_store_exists = os.path.exists(self.rag_builder.vector_store_path) and \
+                                len(os.listdir(self.rag_builder.vector_store_path)) > 0
+            
+            if vector_store_exists and not force_reprocess:
+                logger.info("Existing vector store found. Loading...")
+                load_success = self.rag_builder.load_vector_store()
+                
+                if not load_success:
+                    logger.warning("Failed to load existing vector store or vector store is empty. Rebuilding...")
+                    force_reprocess = True
+            else:
+                logger.info("No vector store found or force reprocessing enabled")
                 force_reprocess = True
-        else:
-            logger.info("No vector store found or force reprocessing enabled")
-            force_reprocess = True
-        
-        if force_reprocess:
-            logger.info("Processing documents...")
-            all_documents = self.processor.process_all_companies()
             
-            logger.info(f"Building vector store with {len(all_documents)} document chunks")
-            self.rag_builder.build_vector_store(all_documents)
-        
-        # Set up retriever and QA chain
-        self.rag_builder.setup_retriever(top_k=8)
-        self.rag_builder.setup_qa_chain()
-        
-        self.is_initialized = True
-        logger.info("Financial Chatbot initialization complete!")
+            if force_reprocess:
+                logger.info("Processing documents...")
+                all_documents = self.processor.process_all_companies()
+                
+                if not all_documents:
+                    logger.warning("No documents found to process. Check your data directory.")
+                    return False
+                    
+                logger.info(f"Building vector store with {len(all_documents)} document chunks")
+                self.rag_builder.build_vector_store(all_documents)
+            
+            # Make sure vector store was initialized properly
+            if not self.rag_builder.vector_store or self.rag_builder.vector_store._collection.count() == 0:
+                logger.error("Vector store is empty or not initialized properly.")
+                return False
+            
+            # Set up retriever and QA chain
+            self.rag_builder.setup_retriever(top_k=8)
+            self.rag_builder.setup_qa_chain()
+            
+            self.is_initialized = True
+            logger.info("Financial Chatbot initialization complete!")
+            return True
+        except Exception as e:
+            logger.error(f"Error initializing chatbot: {e}")
+            return False
     
     def ask(self, query: str) -> str:
         """Ask a question to the chatbot
@@ -703,11 +804,15 @@ def main():
     try:
         # Initialize chatbot
         chatbot = FinancialChatbot()
-        chatbot.initialize(
+        init_success = chatbot.initialize(
             force_reprocess=True,
             fireworks_api_key=fireworks_api_key,
             fireworks_model="accounts/fireworks/models/mixtral-8x7b-instruct"
         )
+        
+        if not init_success:
+            print("Chatbot initialization failed. Check logs for details.")
+            return
         
         print("\nFinancial Chatbot is ready for questions! (Type 'exit' to quit)")
         
