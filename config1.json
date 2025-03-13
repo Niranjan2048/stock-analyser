@@ -1,0 +1,15 @@
+{
+  "company": {
+    "id": "HDFCBANK",
+    "name": "HDFC Bank Ltd",
+    "screener_url": "https://www.screener.in/company/HDFCBANK"
+  },
+  "screener_credentials": {
+    "username": "contact@clearviewcapital.in",
+    "password": "$nowball@123"
+  },
+  "base_dir": "financial_data",
+  "annual_reports_years": 5,
+  "concalls_months": 6,
+  "debug_mode": true
+}
